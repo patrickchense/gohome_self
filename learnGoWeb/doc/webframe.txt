@@ -1,0 +1,48 @@
+网络项目架构
+数据流:
+main.go作为应用入口，初始化一些运行博客所需要的基本资源，配置信息，监听端口。
+路由功能检查HTTP请求，根据URL以及method来确定谁(控制层)来处理请求的转发资源。
+如果缓存文件存在，它将绕过通常的流程执行，被直接发送给浏览器。
+安全检测：应用程序控制器调用之前，HTTP请求和任一用户提交的数据将被过滤。
+控制器装载模型、核心库、辅助函数，以及任何处理特定请求所需的其它资源，控制器主要负责处理业务逻辑。
+输出视图层中渲染好的即将发送到Web浏览器中的内容。如果开启缓存，视图首先被缓存，将用于以后的常规请求。
+
+目录结构:
+|——main.go         入口文件
+|——conf            配置文件和处理模块
+|——controllers     控制器入口
+|——models          数据库处理模块
+|——utils           辅助函数库
+|——static          静态文件目录
+|——views           视图库
+
+参考beego : https://github.com/astaxie/beego
+
+路由，转发
+controller
+session 处理
+表单验证
+用户认证（oauth,oauth2)
+多语言
+
+
+转发路由实现
+func (p *ControllerRegistor) serveHTTP(w http.ResponseWriter, r *http.Request) {
+    defer func() {
+		if err := recover(); err != nil {
+			if !RecoverPanic {
+				// go back to panic
+				panic(err)
+			} else {
+				Critical("Handler crashed with error", err)
+				for i := 1; ; i += 1 {
+					_, file, line, ok := runtime.Caller(i)
+					if !ok {
+						break
+					}
+					Critical(file, line)
+				}
+			}
+		}
+	}()
+}

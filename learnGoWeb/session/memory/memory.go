@@ -5,7 +5,7 @@ import (
 	"container/list"
 	"sync"
 	"time"
-	"learnGoWeb/session"
+	"gohome_self/learnGoWeb/session"
 )
 
 var pder = &Provider{list: list.New()}

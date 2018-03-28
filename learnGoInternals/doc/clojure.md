@@ -40,3 +40,48 @@ ADDQ	$16,SP
 ```
 识别出变量需要在堆上分配，是由编译器的一种叫escape analyze的技术实现的。如果输入命令
 go build --gcflags=-m main.go
+输出:
+```go
+./main.go:20: moved to heap: c
+./main.go:23: &c escapes to heap
+```
+
+###闭包结构体
+```go
+type Closure struct {
+	F func()() 
+	i *int
+}
+```
+闭包的汇编:
+```compile
+func f(i int) func() int {
+	return func() int {
+		i++
+		return i
+	}
+}
+
+
+MOVQ	$type.int+0(SB),(SP)
+PCDATA	$0,$16
+PCDATA	$1,$0
+CALL	,runtime.new(SB)	// 是不是很熟悉，这一段就是i = new(int)	
+...	
+MOVQ	$type.struct { F uintptr; A0 *int }+0(SB),(SP)	// 这个结构体就是闭包的类型
+...
+CALL	,runtime.new(SB)	// 接下来相当于 new(Closure)
+PCDATA	$0,$-1
+MOVQ	8(SP),AX
+NOP	,
+MOVQ	$"".func·001+0(SB),BP
+MOVQ	BP,(AX)				// 函数地址赋值给Closure的F部分
+NOP	,
+MOVQ	"".&i+16(SP),BP		// 将堆中new的变量i的地址赋值给Closure的值部分
+MOVQ	BP,8(AX)
+MOVQ	AX,"".~r1+40(FP)
+ADDQ	$24,SP
+RET	,
+```
+
+

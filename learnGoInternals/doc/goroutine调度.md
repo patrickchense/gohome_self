@@ -346,6 +346,52 @@ __后面也有wakep,再wakeup中触发startm->newm->newosproc->clone等__
 假设goroutine"生病"了，它要进入系统调用了，暂时无法继续执行。进入系统调用时，如果系统调用是阻塞的，goroutine会被剥夺CPU，将状态设置成Gsyscall后放到就绪队列
 Go的syscall库中提供了对系统调用的封装，它会在真正执行系统调用之前先调用函数.entersyscall，并在系统调用函数返回后调用.exitsyscall函数。这两个函数就是通知Go的运行时库这个goroutine进入了系统调用或者完成了系统调用，调度器会做相应的调度
 比如syscall包中的Open函数，它会调用Syscall(SYS_OPEN, uintptr(unsafe.Pointer(_p0)), uintptr(mode), uintptr(perm))实现。这个函数是用汇编写的，在syscall/asm_linux_amd64.s中可以看到它的定义
+这个函数是用汇编写的，在syscall/asm_linux_amd64.s中可以看到它的定义
+```text
+TEXT	·Syscall(SB),7,$0
+	CALL	runtime·entersyscall(SB)
+	MOVQ	16(SP), DI
+	MOVQ	24(SP), SI
+	MOVQ	32(SP), DX
+	MOVQ	$0, R10
+	MOVQ	$0, R8
+	MOVQ	$0, R9
+	MOVQ	8(SP), AX	// syscall entry
+	SYSCALL
+	CMPQ	AX, $0xfffffffffffff001
+	JLS	ok
+	MOVQ	$-1, 40(SP)	// r1
+	MOVQ	$0, 48(SP)	// r2
+	NEGQ	AX
+	MOVQ	AX, 56(SP)  // errno
+	CALL	runtime·exitsyscall(SB)
+	RET
+ok:
+	MOVQ	AX, 40(SP)	// r1
+	MOVQ	DX, 48(SP)	// r2
+	MOVQ	$0, 56(SP)	// errno
+	CALL	runtime·exitsyscall(SB)
+	RET
+```
+可以看到它进系统调用和出系统调用时分别调用了runtime.entersyscall和runtime.exitsyscall函数, 其中处理了什么？
+1. 将函数的调用者的SP,PC等保存到结构体G的sched域中。同时，也保存到g->gcsp和g->gcpc等，这个是跟垃圾回收相关的。
+2. 检查结构体Sched中的sysmonwait域，如果不为0，则将它置为0，并调用runtime·notewakeup(&runtime·sched.sysmonnote)。做这这一步的原因是，目前这个goroutine要进入Gsyscall状态了，它将要让出CPU。如果有人在等待CPU的话，会通知并唤醒等待者，马上就有CPU可用了
+3. 将m的MCache置为空，并将m->p->m置为空，表示进入系统调用后结构体M是不需要MCache的，并且P也被剥离了，将P的状态设置为PSyscall
+有一个与entersyscall函数稍微不同的函数叫entersyscallblock，它会告诉提示这个系统调用是会阻塞的，因此会有一点点区别。它调用的releasep和handoffp
+releasep将P和M完全分离，使p->m为空，m->p也为空，剥离m->mcache，并将P的状态设置为Pidle。注意这里的区别，在非阻塞的系统调用entersyscall中只是设置成Psyscall，并且也没有将m->p置为空
+handoffp切换P。将P从处于syscall或者locked的M中，切换出来交给其它M。每个P中是挂了一个可执行的G的队列的，如果这个队列不为空，即如果P中还有G需要执行，则调用startm让P与某个M绑定后立刻去执行，否则将P挂到idlep队列中
+出系统调用时会调用到runtime·exitsyscall，这个函数跟进系统调用做相反的操作。它会先检查当前m的P和它状态，如果P不空且状态为Psyscall，则说明是从一个非阻塞的系统调用中返回的，这时是仍然有CPU可用的。
+因此将p->m设置为当前m，将p的mcache放回到m，恢复g的状态为Grunning。否则，它是从一个阻塞的系统调用中返回的，因此之前m的P已经完全被剥离了。这时会查看调用中是否还有idle的P，如果有，则将它与当前的M绑定
+4. 如果从一个阻塞的系统调用中出来，并且出来的这一时刻又没有idle的P了，要怎么办呢？这种情况代码当前的goroutine无法继续运行了，调度器会将它的状态设置为Grunnable，将它挂到全局的就绪G队列中，然后停止当前m并调用schedule函数
 
+###goroutine消亡
+goroutine的消亡比较简单，注意在函数newproc1，设置了fnstart为goroutine执行的函数，而将新建的goroutine的sched域的pc设置为了函数runtime.exit
+当fnstart函数执行完返回时，它会返回到runtime.exit中。这时Go就知道这个goroutine要结束了，runtime.exit中会做一些回收工作，会将g的状态设置为Gdead等，并将g挂到P的free队列中
+
+从以上的分析中，其实已经基本上经历了goroutine的各种状态变化。在newproc1中新建的goroutine被设置为Grunnable状态，投入运行时设置成Grunning。
+在entersyscall的时候goroutine的状态被设置为Gsyscall，到出系统调用时根据它是从阻塞系统调用中出来还是非阻塞系统调用中出来，又会被设置成Grunning或者Grunnable的状态。
+在goroutine最终退出的runtime.exit函数中，goroutine被设置为Gdead状态  
+goroutine的状态变迁图：
+![](images/5.2.goroutine_state.jpg?raw=true)
 
 

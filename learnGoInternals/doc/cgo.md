@@ -72,10 +72,87 @@ cgo_exp.cgo1.go  cgo_exp.cgo2.c  _cgo_export.c  _cgo_export.h  _cgo_flags  _cgo_
 
 ###桩文件
 cgo生成了很多文件，其中大多数作用都是包装现有的函数，或者进行声明
+cgo做这些封装原因来自两方面，一方面是Go运行时调用cgo代码时要做特殊处理，比如runtime.cgocall。
+另一方面是由于Go和C使用的命名空间不一样，需要加一层转换，像·_Cfunc_test中的·字符是Go使用的命令空间区分，
+而在C这边使用的是_cgo_1b9ecf7f7656_Cfunc_test
+
+cgo会识别任意的C.xxx关键字，使用gcc来找到xxx的定义。C中的算术类型会被转换为精确大小的Go的算术类型。
+C的结构体会被转换为Go结构体，对其中每个域进行转换。无法表示的域将会用byte数组代替。
+C的union会被转换成一个结构体，这个结构体中包含第一个union成员，然后可能还会有一些填充。
+C的数组被转换成Go的数组，C指针转换为Go指针。
+C的函数指针会被转换为Go中的uinptr。C中的void指针转换为Go的unsafe.Pointer。
+所有出现的C.xxx类型会被转换为_C_xxx
+
+如果xxx是数据，那么cgo会让C.xxx引用那个C变量（先做上面的转换）。
+为此，cgo必须引入一个Go变量指向C变量，链接器会生成初始化指针的代码。例如，gmp库中
+```go
+mpz_t zero;
+```
+cgo会引入一个变量引用C.zero：
+```go
+var _C_zero *C.mpz_t
+```
+cgo转换中最重要的部分是函数。如果xxx是一个C函数，那么cgo会重写C.xxx为一个新的函数_C_xxx，
+这个函数会在一个标准pthread中调用C的xxx。这个新的函数还负责进行参数转换，转换输入参数，调用xxx，然后转换返回值
+
+参数转换和返回值转换与前面的规则是一致的，除了数组。数组在C中是隐式地转换为指针的，而在Go中要显式地将数组转换为指针
+
+处理垃圾回收是个大问题。如果是Go中引用了C的指针，不再使用时进行释放，这个很容易。麻烦的是C中使用了Go的指针，但是Go的垃圾回收并不知道，这样就会很麻烦
+
+###运行时库部分
+运行时库会对cgo调用做一些处理，就像前面说过的，执行C函数之前会运行runtime.entersyscall，而C函数执行完返回后会调用runtime.exitsyscall。
+让cgo的运行仿佛是在另一个pthread中执行的，然后函数执行完毕后将返回值转换成Go的值。
+
+比较难处理的情况是，在cgo调用的C函数中，发生了C回调Go函数的情况，这时处理起来会比较复杂。因为此时是没有Go运行环境的，所以必须再进行一次特殊处理，
+回到Go的goroutine中调用相应的Go函数代码，完成之后继续回到C的运行环境。看上去有点复杂，但是cgo对于在C中调用Go函数也是支持的
+
+从宏观上来讲cgo的关键技术就是这些，由cgo命令生成一些桩代码，负责C类型和Go类型之间的转换，命名空间处理以及特殊的调用方式处理。
+而运行时库部分则负责处理好C的运行环境，类似于给C代码一个非分段的栈空间并让它脱离与调度系统的交互
 
 
+##Go调用C
+从Go中调用C的函数test，cgo生成的代码调用是runtime.cgocall(_cgo_Cfunc_test, frame)：
+```text
+void
+·_Cfunc_test(struct{uint8 x[8];}p)
+{
+	runtime·cgocall(_cgo_1b9ecf7f7656_Cfunc_test, &p);
+}
+```
+其中cgocall的第一个参数_cgo_Cfunc_test是一个由cgo生成并由gcc编译的函数：
+```text
+void
+_cgo_1b9ecf7f7656_Cfunc_test(void *v)
+{
+	struct {
+		int p0;
+		char __pad4[4];
+	} __attribute__((__packed__)) *a = v;
+	test(a->p0);
+}
+```
+runtime.cgocall将g锁定到m，调用entersyscall，这样不会阻塞其它的goroutine或者垃圾回收，然后调用runtime.asmcgocall(_cgo_Cfunc_test, frame)
+```go
+void
+runtime·cgocall(void (*fn)(void*), void *arg)
+{
+	runtime·lockOSThread();
+	runtime·entersyscall();
+	runtime·asmcgocall(fn, arg);
+	runtime·exitsyscall();
 
+	endcgo();
+}
+```
+runtime.entersyscall宣布代码进入了系统调用，这样调度器知道在我们运行外部代码，于是它可以创建一个新的M来运行goroutine。调用asmcgocall是不会分裂栈并且不会分配内存的，因此可以安全地在"syscall call"时调用，不用考虑GOMAXPROCS计数
+runtime.asmcgocall是用汇编实现的，它会切换到m的g0栈，然后调用_cgo_Cfunc_test函数。由于m的g0栈不是分段栈，因此切换到m->g0栈(这个栈是操作系统分配的栈)后，可以安全地运行gcc编译的代码以及执行_cgo_Cfunc_test(frame)函数
+_cgo_Cfunc_test使用从frame结构体中取得的参数调用实际的C函数test，将结果记录在frame中，然后返回到runtime.asmcgocall
+重获控制权之后，runtime.asmcgocall切回之前的g(m->curg)的栈，并且返回到runtime.cgocall
+当runtime.cgocall重获控制权之后，它调用exitsyscall，然后将g从m中解锁。exitsyscall后m会阻塞直到它可以运行Go代码而不违反$GOMAXPROCS限制。
+以上就是Go调用C时，运行时库方面所做的事情，是不是很简单呢？因为总结起来就两点，第一点是runtime.entersyscall，让cgo产生的外部代码脱离goroutine调度系统。第二点就是切换m的g0栈，这样就不必担忧分段栈方面的问题。
 
+###C调用Go
+较少
 
 
 

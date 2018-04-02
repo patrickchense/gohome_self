@@ -126,6 +126,223 @@ framepointer使go tool gdb, pref能了解go 调用过程(call stack)
 * Dead code elimination
 
 ###escape analysis
+就是一些本来放在stack中的变量，被放到了heap中
+* local变量lifecycle 超过了本身的func的lifetime
+* new, make 肯定会分配再heap
 
+例子(escape_exp.go/escape_exp1.go)
+```text
+-bash-3.2$ go build -gcflags=-m escape_exp.go
+# command-line-arguments
+./escape_exp.go:5:17: Sum make([]int, 100) does not escape
+# command-line-arguments
+runtime.main_main·f: relocation target main.main not defined
+runtime.main_main·f: undefined: "main.main"
+```
+
+###Inlining
+方法内脸(jvm JIT也会做的优化)
+原因: 方法的调用存在固定的cost，比如stack和preemption(空间)检查,一些优化可以被硬件做到，仍旧会有cpu和内存方面的cost
+内联要注意两点：
+* 方法不能太大，如果太大，那么节约的cost会认为negligible(微不足道的)
+* small方法（leaf), 是内联关注的，针对的
+
+例子(inlining_exp.go/inlining_exp_huibian.txt)
+
+###dead code elimination
+dead code elimination消除永远不会走到的code path, 和内联一起消除loop, branches不能reached
+可以利用这个特性再GO 代码中加入expensive debugging 然后 hide
+```go
+const debug = false
+```
+与build 工具一起使用
+[Using // +build to switch between debug and release builds](http://dave.cheney.net/2014/09/28/using-build-to-switch-between-debug-and-release)
+[How to use conditional compilation with the go build tool](http://dave.cheney.net/2013/10/12/how-to-use-conditional-compilation-with-the-go-build-tool)
+
+###compiler flags
+```go
+go build -gcflags=$FLAGS
+```
+可选的一些option:
+* -S 打印go的编译的package
+* -l 控制inlining, -l 不用inlining, -l -l 增加inlining级别(更多的-l 增加了compiler的inlining). 可以测试来确定不同的compile时间，文件大小，运行时间
+* -m 控制了是否打印优化策略，比如inlining, escape analysis. -m -m 打印更多
+* -l -N 禁止所有优化
+
+延伸阅读[Codegen Inspection](https://go-talks.appspot.com/github.com/rakyll/talks/gcinspect/talk.slide#1)
+
+##memery management & GC tuning
+Go GC change history:
+* 1.0, STW, 标记清扫collector, 极度依赖tcmalloc
+* 1.3, 完全精准回收, 减少memory leak
+* 1.5, 新的GC设计, 专注于减少latency 而不是 吞吐throughput
+* 1.6, 提高GC, 能对大的heap 进行low latency回收
+* 1.7, 较小的GC提高, 主要是refactoring 重构
+* 1.8, 减少STW时间, 当前减少到100ms 区间
+* 1.9, ROC collector, 作为实验性的, 扩展goroutine的escape analysis概念
+
+###GC monitoring
+设置GODEBUG 环境变量来打开GC日志
+```text
+% env GODEBUG=gctrace=1 godoc -http=:8080
+gc 1 @0.017s 8%: 0.021+3.2+0.10+0.15+0.86 ms clock, 0.043+3.2+0+2.2/0.002/0.009+1.7 ms cpu, 5->6->1 MB, 4 MB goal, 4 P
+gc 2 @0.026s 12%: 0.11+4.9+0.12+1.6+0.54 ms clock, 0.23+4.9+0+3.0/0.50/0+1.0 ms cpu, 4->6->3 MB, 6 MB goal, 4 P
+gc 3 @0.035s 14%: 0.031+3.3+0.76+0.17+0.28 ms clock, 0.093+3.3+0+2.7/0.012/0+0.84 ms cpu, 4->5->3 MB, 3 MB goal, 4 P
+gc 4 @0.042s 17%: 0.067+5.1+0.15+0.29+0.95 ms clock, 0.20+5.1+0+3.0/0/0.070+2.8 ms cpu, 4->5->4 MB, 4 MB goal, 4 P
+gc 5 @0.051s 21%: 0.029+5.6+0.33+0.62+1.5 ms clock, 0.11+5.6+0+3.3/0.006/0.002+6.0 ms cpu, 5->6->4 MB, 5 MB goal, 4 P
+gc 6 @0.061s 23%: 0.080+7.6+0.17+0.22+0.45 ms clock, 0.32+7.6+0+5.4/0.001/0.11+1.8 ms cpu, 6->6->5 MB, 7 MB goal, 4 P
+gc 7 @0.071s 25%: 0.59+5.9+0.017+0.15+0.96 ms clock, 2.3+5.9+0+3.8/0.004/0.042+3.8 ms cpu, 6->8->
+``` 
+Show godoc with GODEBUG=gctrace=1 enabled
+
+PS:再线上环境使用这个功能，不会产生性能负担
+
+远程monitor(telemetry) 推荐使用 net/http/pprof
+```go
+import _ "net/http/pprof"
+```
+引入package之后，会在debug/pprof注册一个handler，记录多种metrics:
+* 正在运行的goroutines列表, /debug/pprof/heap?debug=1
+* 内存回收数据报告, /debug/pprof/heap?debug=1
+
+PS:net/http/pprof 会自动注册到默认的default.ServeMux, 当使用 http.ListenAndServe(address, nil) 就可见
+```text
+godoc -http=:8080, show /debug/pprof
+```
+###GC tuning
+Go 运行时提供一个环境变量来优化GC, __GOGC__
+公式:
+```text
+goal = reachable * (1 + GOGC/100)
+```
+举例: 当前256Mheap, GOGC=100(默认),当heap扩展, grow 公式:
+```text
+512MB = 256MB * (1 + 100/100)
+```
+总结:
+* GOGC > 100, heap会更快的增长, 减少GC压力
+* GOGC < 100, heap增长较慢,GC压力加大
+
+###优化手段
+####减少分配(reduce allocation)
+
+####strings & []bytes
+Go string 是immutable, []byte mutable
+区分使用场景，比如[]byte多用来IO或网络IO，减少[]byte和string的转换
+bytes包提供了很多方法类似操作string来操作[]byte, Split, Compare, HasPrefix,Trim等
+再底层strings和bytes包使用了一样的基本类型
+
+####使用[]byte 作为map key
+这里Go编译器有个特殊的优化,避免了byte slice到string的显示转换
+```go
+var m map[string]string
+v, ok := m[string(bytes)]
+```
+如果手动转换，就不能被优化
+```go
+key := string(bytes)
+val, ok := m[key]
+```
+
+####避免string +
+使用append
+
+####提前设置slice长度
+append 会加大cost
+slice默认增加方式: double到1024, 然后每次25%, 例子(slice_append_expand_exp.go)
+
+####使用sync.Pool
+使用对象池, 类似缓存(java 弱连接缓存对列, FILO, )
+sync.Pool没有大小或上限, 向里add或take直到GC发生,就会无条件清空
+```go
+var pool = sync.Pool{New: func() interface{} { return make([]byte, 4096) }}
+
+func fn() {
+    buf := pool.Get().([]byte) // takes from pool or calls New
+    // do work
+    pool.Put(buf) // returns buf to the pool
+}
+```
+PS: 不能当作cache用，很难用
+
+##并发
+Go就是以轻量级并发模型闻名
+但是轻量级的代价就是，过度使用会导致不可预期的性能问题
+
+###goroutine
+简单使用，创建开销小，基本可认为free
+每个goroutine的stack内存开销最小2k
+2048 * 1,000,000 = 2GB, 所以1百万goroutine啥也不干就要2G
+所以不能无限量创建goroutine， 每次创建一个goroutine，必须知道how & when 这个goroutine exit，否则不小心就会导致memory leak
+
+###efficient network polling
+Go处理网络IO使用了高效的操作系统级别的polling机制(kqueue, epoll, windows IOCP 等),很多goroutines会被单一的操作系统线程服务
+但是对于本地文件IO，Go没有很多IO polling，每次*os.File消费，都需要一个系统级别的线程
+过多的本地文件IO会导致系统创建太多线程而不堪重负
+
+###io.Reader & io.Writer 没有buffered
+io.Reader & io.Writer没有buffered, 包括net.Conn & os.Stdout
+使用bufio.NewReader(r) & bufio.NewWriter(w) 是更好的选择
+
+###使用streaming io
+永远不要不停的read data到一个[]byte,有可能会很大，不利于GC，造成STW太长
+高效的使用io.ReadFrom/io.WriteTo 如果涉及很多io.Copy,避免copydata到tmp memory
+
+###设置IO timeout
+给network io/io 设置timeout, SetDeadline, SetReadDeadline等
+需要设置blocking IO的数量上限，通过goroutine pool, buffed channel 或者 semaphore
+```go
+var semaphore = make(chan struct{}, 10)
+
+func processRequest(work *Work) {
+    semaphore <- struct{}{} // acquire semaphore
+    // process request
+    <-semaphore // release semaphore
+}
+```
+
+###defer expensive
+因为defer记录了defer 需要的回调参数
+```go
+defer mu.Unlock()
+```
+==
+```go
+defer func() {
+	mu.Unlock()
+}
+```
+
+可以通过一些方式来起到defer的效果,比如记录到map或者struct中，但是这就是典型的为了性能牺牲可读性和可维护性的情况
+
+###最小化cgo
+cgo的作用类似与再go 和 C 之间的适配器, 是需要cost的，而且可能会阻塞app
+cgo的调用类似blocking io, 需要系统的线程,特别是不要再loop中调用cgo
+
+最好能够不用cgo
+
+##使用latest的Go
+最新的最好
+* 1.4 不能用never
+* 1.5 & 1.6 slow compiler, 但是生成快一点的code, 快一点的GC
+* 1.7 提高了30%的compile time(对比1.6), 2x的连接速度提升
+* 1.8, 编译速度提高不多,但是对于非Intel的架构有显著的代码质量提高
+
+[1.8 performance improvement](http://dave.cheney.net/2016/09/18/go-1-8-performance-improvements-one-month-in)
+[1.7 toolchain improvement](http://dave.cheney.net/2016/04/02/go-1-7-toolchain-improvements)
+
+##结论
+* 写最简单的代码
+* 从最简单的开始
+* 永远注意Measure
+* 如果性能ok，只需要优化最主要的部分
+* 随着系统扩展，注意热点的变化
+* 随时重写复杂但不是关键的代码
+* profile系统，找到瓶颈
+* 更短代码的更快
+* 颈短的代码就是更小的代码，有助于cpu cache
+* 注意内存分配，减少不必要的分配
+* 性能和可读性同样重要
+* 稳定性更重要
 
 

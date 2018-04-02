@@ -1,0 +1,14 @@
+assembly
+flavoured
+telemetry
+allocate
+semaphore
+substantial
+
+部件
+有味
+遥测
+分配
+信号
+大量的
+

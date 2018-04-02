@@ -38,7 +38,17 @@ if *flagCpuprofile != "" {
 ```
 可以写到特定的文件，用同样的go tool pprof 可以查看
 pprof的可视化例子![](images/cpu_profile.png)
+选项 --list=functionName 可以查看某个func的耗时
+解决cpu func问题的一些hits:
+* runtime.mallocgc方法耗时长，证明程序分配了很多小的空间，看看哪里产生的小对象
+* channel操作，sync.Mutext,其他同步操作耗时长，系统资源竞争激烈，考虑重构，处理共享资源，通常sharding/partitioning,local buffering
+/batching, copy-on-write等手段
+* syscall.Read/Write耗时长,程序可能有很多小的文件读写，尝试用bufio包的缓存
+* GC时间长，可能的问题是分配对象太多，heap设置过小等
 
+##Memory
+显示方法对于heap的占用情况
+使用: go test --memprofile , net/http/pprof http://myserver:6060/debug/pprof/heap 查看，使用 runtime/pprof.WriteHeapProfile
 
 
 

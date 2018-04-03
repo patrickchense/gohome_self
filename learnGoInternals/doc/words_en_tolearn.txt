@@ -12,3 +12,5 @@ substantial
 信号
 大量的
 
+granularity  粒度
+

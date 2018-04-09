@@ -1,0 +1,114 @@
+[原文](https://ieevee.com/tech/2017/07/10/go-import.html)
+go 依赖管理, 主要是如何管理项目中的import, 介绍go的官方解决及常见的开源  
+比较重要的包括
+
+##vendor
+依赖GOPATH来解决go import有个很严重的问题：如果项目依赖的包做了修改，或者干脆删掉了，会影响我的项目  
+为了能让项目继续使用这些依赖包，有这么几个办法：
+* 将依赖包拷贝到项目源码树中，然后修改import
+* 将依赖包拷贝到项目源码树中，然后修改GOPATH
+* 在某个文件中记录依赖包的版本，然后将GOPATH中的依赖包更新到对应的版本(因为依赖包实际是个git库，可以切换版本)
+
+为了解决这个问题，go在1.5版本引入了vendor属性(默认关闭，需要设置go环境变量GO15VENDOREXPERIMENT=1)，并在1.6版本中默认开启了vendor属性
+简单来说，vendor属性就是让go编译时，优先从项目源码树根目录下的vendor目录查找代码(可以理解为切了一次GOPATH)，如果vendor中有，则不再去GOPATH中去查找
+但是vendor目录又带来了一些新的问题：
+* vendor目录中依赖包没有版本信息。这样依赖包脱离了版本管理，对于升级、问题追溯，会有点困难。
+* 如何方便的得到本项目依赖了哪些包，并方便的将其拷贝到vendor目录下？ 
+
+社区为了解决这些(工程)问题，在vendor基础上开发了多个管理工具，比较常用的有godep, govendor, glide。go官方也在开发官方dep
+
+
+##godep
+[godep](https://github.com/tools/godep)
+godep的使用者众多，如docker，kubernetes， coreos等go项目很多都是使用godep来管理其依赖，当然原因可能是早期也没的工具可选
+godep早期版本并不依赖vendor，所以对go的版本要求很松，go 1.5之前的版本也可以用，只是行为上有所不同。在vendor推出以后，godep也改为使用vendor了
+godep使用很简单：当你的项目编写好了，使用GOPATH的依赖包测试ok了的时候，执行：
+```text
+$ godep save
+```
+以[hcache](https://ieevee.com/tech/2017/07/10/github.com/silenceshell/hcache)为例，执行go save，会做2件事：
+* 扫描本项目的代码，将hcache项目依赖的包及该包的版本号(即git commit)记录到Godeps/Godeps.json文件中
+* 将依赖的代码从GOPATH/src中copy到vendor目录(忽略原始代码的.git目录)。对于不支持vendor的早期版本，则会拷贝到Godeps/_workspace/里
+
+一个Godeps.json的例子:
+```json
+{
+    "ImportPath": "github.com/silenceshell/hcache",
+    "GoVersion": "go1.7",
+    "GodepVersion": "v79",
+    "Deps": [
+        {   
+            "ImportPath": "github.com/tobert/pcstat",
+            "Rev": "91a7346e5b462a61e876c0574cb1ba331a6a5ac5"
+        },  
+        {   
+            "ImportPath": "golang.org/x/sys/unix",
+            "Rev": "0b25a408a50076fbbcae6b7ac0ea5fbb0b085e79"
+        }   
+    ]   
+}
+```
+如果要增加新的依赖包：
+```text
+Run go get foo/bar
+Edit your code to import foo/bar.
+Run godep save (or godep save ./…).
+```
+如果要更新依赖包：
+```text
+Run go get -u foo/bar
+Run godep update foo/bar. (You can use the … wildcard, for example godep update foo/…).
+```
+
+
+##glide
+[glide](https://github.com/Masterminds/glide)
+glide也是在vendor之后出来的。glide的依赖包信息在glide.yaml和glide.lock中，前者记录了所有依赖的包，后者记录了依赖包的版本信息(合成一个多好)
+glide使用也不麻烦：
+```text
+glide create  # 创建glide工程，生成glide.yaml
+glide install # 生成glide.lock，并拷贝依赖包
+work, work, work
+glide update  # 更新依赖包信息，更新glide.lock
+```
+glide install会根据glide.lock来更新包的信息，如果没有则会走一把glide update生成glide.lock
+最终一个使用glide管理依赖的的工程会是这样：
+```text
+──$GOPATH/src/myProject (Your project)
+  ├─ glide.yaml
+  ├─ glide.lock
+  ├─ main.go (Your main go code can live here)
+  ├─ mySubpackage (You can create your own subpackages, too)
+  |    ├─ foo.go
+  ├─ vendor
+       ├─ github.com
+            ├─ Masterminds
+                  ├─ ... etc.
+```
+glide的功能更丰富一些。
+* glide tree可以很直观的看到vendor中的依赖包(以后会被移除掉，感觉没啥用)
+* glide list可以列出vendor下所有包
+* glide支持的Version Control Systems更多，除了支持git，还支持 SVN, Mercurial (Hg), Bzr
+* 最重要的，glide.yaml可以指定更多信息，例如依赖包的tag、repo、本package的os, arch。允许指定repo可以解决package名不变，但使用的是fork出来的的工程。
+
+
+
+##go vendor
+govendor是在vendor之后出来的，功能相对godep多一点，不过就核心问题的解决来说基本是一样的
+govendor生成vendor目录的时候需要2条命令：
+```text
+govendor init生成vendor/vendor.json，此时文件中只有本项目的信息
+govendor add +external更新vendor/vendor.json，并拷贝GOPATH下的代码到vendor目录中。
+```
+
+
+##官方比较
+[比较](https://github.com/golang/go/wiki/PackageManagementTools)
+godep更直观，使用者也多一些，一些个人的小项目可以用；glide功能更丰富，更接近maven(例如glide.lock跟maven的pom.xml比较类似，可以指定获取某一个版本)，新的项目可以考虑使用glide
+
+##gvt
+glide/godep/govendor都只会拉import的依赖包，对于依赖包的依赖包则不会管。这种情况可以用gvt把所有的依赖全部拉到vendor目录下
+
+##vendor问题
+* 代码copy的泛滥：某个包在不同的项目中各有一份copy，而且其版本可能不一样
+* 当依赖的包比较多的时候，vendor目录也会非常庞大

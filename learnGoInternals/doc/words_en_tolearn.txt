@@ -14,3 +14,5 @@ substantial
 
 granularity  粒度
 
+niladic 译注：
+

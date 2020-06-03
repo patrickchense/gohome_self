@@ -1,11 +1,11 @@
 package main
 
 import (
-	"os"
-	"fmt"
-	"strconv"
 	"bufio"
-	"learnGO/stack"
+	"fmt"
+	"gohome_self/learnGO/stack"
+	"os"
+	"strconv"
 )
 
 func main() {
@@ -50,4 +50,3 @@ func main() {
 		}
 	}
 }
-

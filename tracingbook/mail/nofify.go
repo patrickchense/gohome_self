@@ -16,8 +16,8 @@ type NotifyByMail struct {
 	To      string
 	From    string
 	Content string
-	Pass    string
 	Title   string
+	Pass    string
 }
 
 func (nm *NotifyByMail) NotifyUpdates(updateItems []models.UpdateItem) {
@@ -45,7 +45,7 @@ func (nm *NotifyByMail) notify() bool {
 		"Subject:" + nm.Title + "\n\n" +
 		nm.Content
 	err := smtp.SendMail("smtp.gmail.com:587",
-		smtp.PlainAuth("", nm.From, nm.Pass, "smtp.gmail.com"),
+		smtp.PlainAuth("", nm.From, "7dgM\"{xkH2hx_7gJ", "smtp.gmail.com"),
 		nm.From, []string{nm.To}, []byte(msg))
 
 	if err != nil {
